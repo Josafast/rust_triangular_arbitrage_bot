@@ -1,41 +1,29 @@
 use dotenv::dotenv;
-// use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use std::env;
-use triangular_arbitrage_bot::websocket;
+use triangular_arbitrage_bot::BinanceWs;
 
 #[tokio::main]
 async fn main() {
     dotenv().ok();
     env_logger::init();
 
-    let binance_url = match env::var("BINANCE_WS_URL") {
-        Ok(value) => value,
-        Err(e) => {
-            log::error!("La variable de entorno BINANCE_WS_URL no existe: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    log::info!("Binance URL: {}", binance_url);
-
     let shutdown_token = CancellationToken::new();
-    // let (tx, _) = broadcast::channel(100);
+    let binance_ws = BinanceWs::new(shutdown_token.clone());
 
-    let binance_shutdown = shutdown_token.clone();
+    let mut rx = binance_ws.get_receiver();
+
     tokio::spawn(async move {
-        websocket::stream_websocket(&binance_url, binance_shutdown).await;
+        log::info!("Receptor de datos iniciado...");
+        while let Ok(tick) = rx.recv().await {
+            log::info!("Recibido: {:<10} | Bid: {:>15} (q:{:>12}) | Ask: {:>15} (q:{:>12})", 
+                &tick.order.symbol, 
+                &tick.order.bid_price,
+                &tick.order.bid_qty,
+                &tick.order.ask_price,
+                &tick.order.ask_qty
+            );
+        }
     });
 
-    //log::info!("Bot corriendo. Presione Ctrl+C para salir.");
-
-    loop {
-        if shutdown_token.is_cancelled() {
-            break;
-        }
-    }
-
-    //tokio::signal::ctrl_c().await.expect("Error al escuchar señal de cierre");
-    
-    log::info!("Cerrando bot...");
+    binance_ws.stream_websocket().await;
 }
