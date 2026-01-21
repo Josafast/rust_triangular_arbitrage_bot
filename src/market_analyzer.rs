@@ -41,10 +41,6 @@ pub async fn analyze_tickers(mut rx: broadcast::Receiver<OrderTicker>, shutdown_
                 );
                 */
 
-                let calculate_timestamp = Instant::now();
-                let calculate_duration = calculate_timestamp.duration_since(ticker_timestamp);
-                log::info!("\nCalculate duration: {:?}", calculate_duration);
-
                 if let Ok((net_profit, ceiled_volume)) = triangle.calculate_opportunity() {
                     log::warn!("{:.9}", FastMath::to_printable(ceiled_volume));
                     log::warn!("{:.2}%", FastMath::ptc(net_profit));
