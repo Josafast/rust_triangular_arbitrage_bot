@@ -1,1 +1,4 @@
 /target
+/vendor
+/test_book_json_files
+.env
