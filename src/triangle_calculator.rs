@@ -9,6 +9,10 @@ pub struct Triangle {
     a_price: u128,
     b_price: u128,
     c_price: u128,
+
+    a_qty: u128,
+    b_qty: u128,
+    c_qty: u128,
     
     fee_ratio: u128,
 
@@ -26,6 +30,9 @@ impl Triangle {
             a_price: 0,
             b_price: 0,
             c_price: 0,
+            a_qty: 0,
+            b_qty: 0,
+            c_qty: 0,
             fee_ratio: FastMath::saturate(get_fee()),
             ab_reciprocal: 0
         }
@@ -39,12 +46,12 @@ impl Triangle {
     }
 
     pub(crate) fn process_ticker(&mut self, order: &OrderTicker) -> Result<bool, bool> {
-        let (old_price, price, index) = if order.symbol == self.symbol_a {
-            (&mut self.a_price, order.ask_price, 0)
+        let (old_price, old_qty, price, qty, index) = if order.symbol == self.symbol_a {
+            (&mut self.a_price, &mut self.a_qty, order.ask_price, order.ask_qty, 0)
         } else if order.symbol == self.symbol_b {
-            (&mut self.b_price, order.ask_price, 1)
+            (&mut self.b_price, &mut self.b_qty, order.ask_price, order.ask_qty, 1)
         } else if order.symbol == self.symbol_c {
-            (&mut self.c_price, order.bid_price, 2)
+            (&mut self.c_price, &mut self.c_qty, order.bid_price, order.bid_qty, 2)
         } else {
             return Err(false);
         };
@@ -53,6 +60,7 @@ impl Triangle {
             return Err(false);
         }
         *old_price = price;
+        *old_qty = qty;
 
         if index == 0 || index == 1 { self.update_reciprocal(); }
 
@@ -70,12 +78,24 @@ impl Triangle {
         FastMath::mul(brute_profit, fee_ratio_cube)
     }
 
-    pub(crate) fn calculate_opportunity(&self) -> Result<u128, bool> {
+    fn get_ceiled_volume(&self) -> u128 {
+        let vol_atob = FastMath::mul(self.a_price, self.a_qty);
+
+        let vol_btoc_intermediate = FastMath::mul(self.b_price, self.b_qty);
+        let vol_btoc = FastMath::mul(vol_btoc_intermediate, self.a_price);
+        let vol_ctoa = FastMath::mul(self.c_price, self.c_qty);
+
+        vol_atob.min(vol_btoc).min(vol_ctoa)
+    }
+
+    pub(crate) fn calculate_opportunity(&self) -> Result<(u128, u128), bool> {
         let brute_profit = self.get_ratio_margin();
         let net_profit = self.get_net_profit(brute_profit);
+        let ceiled_volume = self.get_ceiled_volume();
 
+        log::warn!("{:.9}", FastMath::to_printable(ceiled_volume));
         if FastMath::compare_scale(net_profit) {
-            Ok(net_profit)
+            Ok((net_profit, ceiled_volume))
         } else {
             Err(false)
         }
