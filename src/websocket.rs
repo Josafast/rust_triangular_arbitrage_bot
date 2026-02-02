@@ -3,7 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Deserialize;
-use std::{ops::ControlFlow};
+use std::ops::ControlFlow;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
     tungstenite::protocol::{Message, WebSocketConfig},
@@ -14,7 +14,7 @@ use tokio::{net::TcpStream, sync::broadcast};
 use crate::config::{get_binance_url, get_pairs_for_triangle_arbitrage};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
-type WsWriter = futures_util::stream::SplitSink<WsStream, Message>;
+//type WsWriter = futures_util::stream::SplitSink<WsStream, Message>;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OrderTicker {
@@ -61,6 +61,16 @@ impl BinanceWs {
     
     pub fn new_with_url(binance_url: String) -> Self {
         Self::init(&binance_url)
+    }
+
+    #[cfg(test)]
+    pub fn new_dummy(tx: broadcast::Sender<OrderTicker>) -> Self {
+        let url = Url::parse("ws://localhost:1234").expect("Invalid Url");
+
+        Self {
+            url,
+            tx
+        }
     }
 
     pub fn get_receiver(&self) -> broadcast::Receiver<OrderTicker> {
@@ -123,17 +133,26 @@ impl BinanceWs {
     async fn stream_prices(&self, ws_stream: WsStream, shutdown_token: CancellationToken) {
         let (mut write, mut read) = ws_stream.split();
 
+        let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<Message>(100);
+
         loop {
             tokio::select! {
                 _ = shutdown_token.cancelled() => {
                     log::info!("Stream prices stopping due to shutdown signal");
                     break;
-                }
+                },
                 
+                Some(msg_to_send) = response_rx.recv() => {
+                    if let Err(e) = write.send(msg_to_send).await {
+                        log::error!("Error sending Pong: {e}");
+                        break;
+                    }   
+                },
+
                 maybe_msg = read.next() => {
                     match maybe_msg {
                         Some(Ok(msg)) => {
-                            if let ControlFlow::Break(_) = self.handle_ws_message(msg, &mut write).await {
+                            if let ControlFlow::Break(_) = self.handle_ws_message(msg, &response_tx).await {
                                 break; 
                             }
                         }
@@ -151,16 +170,16 @@ impl BinanceWs {
         }
     }
 
-    async fn handle_ws_message(&self, msg: Message, write: &mut WsWriter) -> ControlFlow<(), ()> {
+    async fn handle_ws_message(&self, msg: Message, response_tx: &tokio::sync::mpsc::Sender<Message>) -> ControlFlow<(), ()> {
         match msg {
             Message::Text(text) => {
                 self.process_text_message(&text);
                 ControlFlow::Continue(())
-            }
+            },
             Message::Ping(payload) => {
-                if let Err(e) = write.send(Message::Pong(payload)).await {
-                    log::error!("Error sending Pong: {e}");
-                    return ControlFlow::Break(());
+                if let Err(e) = response_tx.send(Message::Pong(payload)).await {
+                    log::error!("Could'nt get queue Pong on channel: {e}");
+                    return ControlFlow::Break(())
                 }
                 ControlFlow::Continue(())
             }
@@ -178,6 +197,87 @@ impl BinanceWs {
                 let _ = self.tx.send(ticker.order);
             }
             Err(e) => log::error!("Deserializing Error: {e} | Text: {text}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::ControlFlow;
+    use tokio_tungstenite::tungstenite::protocol::Message;
+    use dotenv::dotenv;
+    use tokio_util::sync::CancellationToken;
+    use tokio::sync::broadcast;
+    use tokio::time::{
+        advance,
+        Duration
+    };
+
+    use crate::BinanceWs;
+
+    #[test]
+    fn test_process_invalid_json_does_not_panic() {
+        dotenv().ok();
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let (tx, _rx) = broadcast::channel(10);
+        let binance = BinanceWs::new_dummy(tx);
+
+        binance.process_text_message("This is not a JSON");
+
+        binance.process_text_message(r#"{"method":"ping"}"#);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_exponential_backoff_logic() {
+        dotenv::dotenv().ok();
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let addr = "127.0.0.1:12345";
+        let binance_ws = BinanceWs::new_with_url(format!("ws://{}", addr));
+
+        let shutdown_token = CancellationToken::new();
+        let token_clone = shutdown_token.clone();
+        tokio::spawn(async move {
+            binance_ws.stream_websocket(token_clone).await;
+        });
+
+        advance(Duration::from_millis(10)).await;
+
+        for i in 1..=4 {
+            let wait_time = Duration::from_secs(2u64.pow(i-1));
+
+            let almost = wait_time - Duration::from_millis(100);
+            advance(almost).await;
+
+            advance(Duration::from_millis(101)).await;
+            tokio::task::yield_now().await;
+
+            println!("[Test] {:?} have passed, verifiying log...", wait_time);
+        }    
+
+        shutdown_token.cancel(); 
+    }
+
+    #[tokio::test]
+    async fn test_ping_response_logic() {
+        let (tx, _) = tokio::sync::broadcast::channel(10);
+        let binance = BinanceWs::new_dummy(tx);
+        
+        let (response_tx, mut response_rx) = tokio::sync::mpsc::channel(10);
+        
+        let ping_data = vec![1, 2, 3];
+        let ping_msg = Message::Ping(ping_data.clone());
+        
+        let result = binance.handle_ws_message(ping_msg, &response_tx).await;
+        
+        assert!(matches!(result, ControlFlow::Continue(())));
+        
+        let sent_msg = response_rx.recv().await.expect("Shoud has been an anwser message");
+        if let Message::Pong(pong_data) = sent_msg {
+            assert_eq!(pong_data, ping_data, "Pong must return same data than Ping");
+        } else {
+            panic!("Was waited a Message::Pong");
         }
     }
 }

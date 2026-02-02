@@ -1,6 +1,5 @@
 use std::env;
 
-#[inline(always)]
 pub fn get_env(var: &str) -> String {
     env::var(var).unwrap_or_else(|e| {
         log::error!("ERROR, {} environment variable can't reachable: {}", var, e);
@@ -8,7 +7,6 @@ pub fn get_env(var: &str) -> String {
     })
 }
 
-#[inline(always)]
 pub fn get_pairs_for_triangle_arbitrage() -> [&'static str; 3] {
     let exchange_pairs = get_env("ARBITRAGE_TRIANGLE_PAIRS"); 
 
@@ -22,12 +20,10 @@ pub fn get_pairs_for_triangle_arbitrage() -> [&'static str; 3] {
     [leak_next(), leak_next(), leak_next()]
 }
 
-#[inline(always)]
 pub fn get_fee() -> u128 {
     get_env("FEES").parse::<u128>().expect("FEES would be an integer")
 }
 
-#[inline(always)]
 pub fn get_binance_url() -> String {
     get_env("BINANCE_WS_URL")
 }

@@ -1,5 +1,5 @@
 /target
 /vendor
 /test_book_json_files
-src/triangle_calculator.rs
 .env
+src/triangle_calculator.rs

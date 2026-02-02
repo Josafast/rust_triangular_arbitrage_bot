@@ -1,8 +1,18 @@
+use std::net::SocketAddr;
 use csv::ReaderBuilder;
 use futures_util::{SinkExt};
-use tokio::{net::TcpListener, sync::broadcast, time::Instant};
+use tokio::{net::TcpListener, sync::broadcast, time::{Instant, Duration}};
+use tokio_util::sync::CancellationToken;
 use tokio_tungstenite::tungstenite::Message;
 
+#[derive(Debug, Clone)]
+pub enum ServerControl {
+    Message(String),
+    #[allow(dead_code)]
+    DropConnection
+}
+
+#[allow(dead_code)]
 fn search_global_init_timestamp(files: &[(&str, &str)]) -> u64 {
     let mut min_time = u64::MAX;
 
@@ -24,21 +34,48 @@ fn search_global_init_timestamp(files: &[(&str, &str)]) -> u64 {
     min_time
 }
 
-async fn setup_offline_websocket_server(mut rx: broadcast::Receiver<String>) {
-    let listener = TcpListener::bind("127.0.0.1:9001").await.unwrap();
+pub async fn setup_offline_websocket_server(
+    addr: SocketAddr, 
+    rx: broadcast::Receiver<ServerControl>, 
+    shutdown_token: CancellationToken
+) {
+    let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
 
     tokio::spawn(async move {
-        if let Ok((stream, _)) = listener.accept().await {
-            let mut ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+        loop {
+            tokio::select! {
+                Ok((stream, _)) = listener.accept() => {
+                    let mut current_rx = rx.resubscribe();
 
-            while let Ok(msg_content) = rx.recv().await {
-                if (ws_stream.send(Message::Text(msg_content)).await).is_err() { break; }
+                    tokio::spawn(async move {
+                        let mut ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+                        loop {
+                            tokio::select! {
+                                Ok(control) = current_rx.recv() => {
+                                    match control {
+                                        ServerControl::Message(msg) => {
+                                            if ws_stream.send(Message::Text(msg)).await.is_err() { break };
+                                        },
+                                        ServerControl::DropConnection => {
+                                            drop(ws_stream);
+                                            break;
+                                        }
+                                    }
+                                },
+                                _ = tokio::time::sleep(Duration::from_secs(30)) => { break; }
+                            }
+                        }
+                    });
+                },
+                _ = shutdown_token.cancelled() => { break; }
             }
         }
     });
 }
 
-pub async fn offline_tickers_server() {
+#[allow(dead_code)]
+pub async fn offline_tickers_server_sender(tx: broadcast::Sender<ServerControl>) {
     let files = vec![
         ("BTCUSDT",
          "test_book_json_files/BTCUSDT-bookTicker-2024-03-30.csv"),
@@ -50,9 +87,6 @@ pub async fn offline_tickers_server() {
 
     let global_time_timestamp: u64 = search_global_init_timestamp(&files); 
     let init_timestamp = Instant::now();
-    
-    let (tx, rx) = broadcast::channel::<String>(100);
-    setup_offline_websocket_server(rx).await;
 
     for (symbol, path) in files {
         let tx_clone = tx.clone();
@@ -63,7 +97,6 @@ pub async fn offline_tickers_server() {
             for result in reader.expect("REASON").records() {
                 let record = result.unwrap();
                  
-                // Calculate time to send
                 let event_time = record[5].parse::<u64>().unwrap_or(0);
                 if event_time < global_time_timestamp { continue; }
                 let delay = std::time::Duration::from_millis(event_time - global_time_timestamp);
@@ -73,8 +106,8 @@ pub async fn offline_tickers_server() {
                     tokio::time::sleep(objetive_time - now).await;
                 }
 
-                let msg_content = format!("{{\"stream\":\"{}\",\"data\":{{\"u\":{},\"s\":\"{}\",\"b\":\"{}\",\"B\":\"{}\",\"a\":\"{}\",\"A\":\"{}\"}}}}", "btcusdt@bookTicker", &record[0], symbol, &record[1], &record[2], &record[3], &record[4]);
-                if tx_clone.send(msg_content).is_err() { continue; }
+                let msg_content = format!(r#"{{"stream":"{}","data":{{"u":{},"s":"{}","b":"{}","B":"{}","a":"{}","A":"{}"}}}}"#, "btcusdt@bookTicker", &record[0], symbol, &record[1], &record[2], &record[3], &record[4]);
+                if tx_clone.send(ServerControl::Message(msg_content)).is_err() { continue; }
             }
         });
     }

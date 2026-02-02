@@ -4,7 +4,7 @@ const SCALE: u128 = 1_000_000_000;
 const DECIMALS: u32 = 9;
 
 #[inline(always)]
-fn str_to_u128(string_var: &str) -> u128 {
+pub fn str_to_u128(string_var: &str) -> u128 {
     let mut parts = string_var.split('.');
     let integer_part = parts.next().unwrap_or("0").parse::<u128>().unwrap_or(0);
     let fraction_part = parts.next().unwrap_or("");
@@ -77,5 +77,43 @@ impl FastMath {
     #[inline(always)]
     pub fn compare_scale(val: u128) -> bool {
         val > SCALE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_into_u128() {
+        let result = str_to_u128("100");
+        assert_eq!(result, 100000000000);
+    }
+
+    #[test]
+    fn float_into_u128() {
+        let result = str_to_u128("150.75");
+        assert_eq!(result, 150750000000)
+    }
+
+    #[test]
+    fn into_printable_u128() {
+        let scaled = str_to_u128("100");
+        let result = FastMath::to_printable(scaled);
+        assert_eq!(result, 100.0);
+    }
+
+    #[test]
+    fn division_u128() {
+        let result = FastMath::div(str_to_u128("20"), str_to_u128("5"));
+        let print = FastMath::to_printable(result);
+        assert_eq!(print, 4.0);
+    }
+
+    #[test]
+    fn multiplication_u128() {
+        let result = FastMath::mul(str_to_u128("4"), str_to_u128("5"));
+        let print = FastMath::to_printable(result);
+        assert_eq!(print, 20.0);
     }
 }
